@@ -14,6 +14,7 @@ GRID_LENGTH = 600
 STATE_MENU     = 0
 STATE_GAME     = 1
 STATE_SETTINGS = 2
+STATE_LEVEL_COMPLETE = 3
 game_state = STATE_MENU
 
 menu_options = ["New Game", "Settings", "Exit"]
@@ -167,6 +168,13 @@ MAPS = [
     {"name": "Courtyard Loop","grid": COURTYARD_LOOP, "floor": (22, 24, 28)},
 ]
 
+# ---------- Level System ----------
+current_level = 0
+max_levels = len(MAPS)
+level_complete_time = 0
+LEVEL_COMPLETE_DELAY = 2.0  # seconds to show level complete message
+boss_health = 100  # Max boss health
+boss_current_health = 100  # Current boss health
 
 current_map_index = 0
 
@@ -176,12 +184,14 @@ ROWS, COLS = 0, 0
 WORLD_MAP = {}
 def apply_map(idx):
     """Switch current map, rebuild derived data, recenter player/camera."""
-    global current_map_index, MINI_MAP, ROWS, COLS, WORLD_MAP, FLOOR_RGB
+    global current_map_index, MINI_MAP, ROWS, COLS, WORLD_MAP, FLOOR_RGB, boss_current_health
     current_map_index = idx % len(MAPS)
     MINI_MAP = [row[:] for row in MAPS[current_map_index]["grid"]]
     ROWS, COLS = len(MINI_MAP), len(MINI_MAP[0])
     WORLD_MAP = {(x, y): v for y, row in enumerate(MINI_MAP) for x, v in enumerate(row) if v != 0}
     FLOOR_RGB = MAPS[current_map_index]["floor"]
+    # Reset boss health for new level
+    boss_current_health = boss_health
     # recenter player and face forward
     reset_player()
 
@@ -191,9 +201,15 @@ def reset_player():
     player_yaw = 0.0
     camera_yaw = 0.0
 
+def trigger_level_complete():
+    """Call this function when the boss is defeated"""
+    global game_state, level_complete_time
+    game_state = STATE_LEVEL_COMPLETE
+    level_complete_time = time.time()
+
 # ---------- UI helpers ----------
-def draw_text(x,y, text,font=GLUT_BITMAP_HELVETICA_18):
-    glColor3f(1,1,1)
+def draw_text(x,y, text,font=GLUT_BITMAP_HELVETICA_18, color=(1,1,1)):
+    glColor3f(*color)
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
     glLoadIdentity()
@@ -208,6 +224,63 @@ def draw_text(x,y, text,font=GLUT_BITMAP_HELVETICA_18):
     glMatrixMode(GL_PROJECTION)
     glPopMatrix()
     glMatrixMode(GL_MODELVIEW)
+
+def draw_progress_bar(x, y, width, height, progress, color=(1,1,1)):
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    gluOrtho2D(0, 1000, 0, 800)
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+    
+    # Draw border
+    glColor3f(0.3, 0.3, 0.3)
+    glBegin(GL_LINE_LOOP)
+    glVertex2f(x, y)
+    glVertex2f(x + width, y)
+    glVertex2f(x + width, y + height)
+    glVertex2f(x, y + height)
+    glEnd()
+    
+    # Draw fill
+    glColor3f(*color)
+    glBegin(GL_QUADS)
+    glVertex2f(x + 2, y + 2)
+    glVertex2f(x + 2 + (width-4) * progress, y + 2)
+    glVertex2f(x + 2 + (width-4) * progress, y + height - 2)
+    glVertex2f(x + 2, y + height - 2)
+    glEnd()
+    
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+def show_level_complete_message():
+    global game_state, current_level, level_complete_time
+    if game_state == STATE_LEVEL_COMPLETE:
+        now = time.time()
+        if now - level_complete_time >= LEVEL_COMPLETE_DELAY:
+            if current_level < max_levels - 1:
+                current_level += 1
+                apply_map(current_level)
+                reset_player()
+                game_state = STATE_GAME
+            else:
+                game_state = STATE_MENU  # Game completed, return to menu
+        else:
+            # Draw level complete message
+            draw_centered_text(WIDTH/2, HEIGHT/2, "Level Complete!", 
+                            GLUT_BITMAP_HELVETICA_18, (1, 1, 0))
+            if current_level < max_levels - 1:
+                draw_centered_text(WIDTH/2, HEIGHT/2 - 40, 
+                                "Loading next level...",
+                                GLUT_BITMAP_HELVETICA_12, (1, 1, 1))
+            else:
+                draw_centered_text(WIDTH/2, HEIGHT/2 - 40, 
+                                "Congratulations! Game Complete!",
+                                GLUT_BITMAP_HELVETICA_12, (1, 1, 0))
 
 def draw_centered_text(cx, y, s, font=GLUT_BITMAP_HELVETICA_18, rgb=(1,1,1)):
     def text_w(s, font):
@@ -423,11 +496,17 @@ def draw_settings():
 
 # ---------- Input ----------
 def keyboardListener(key, x, y):
-    """ASCII: O select, R back, ESC quit, WASD movement/strafe."""
-    global game_state, menu_index
+    """ASCII: O select, R back, ESC quit, WASD movement/strafe, K test boss damage."""
+    global game_state, menu_index, boss_current_health
 
     if isinstance(key, str):
         key = key.encode("utf-8")
+        
+    # Test key for boss damage (K)
+    if game_state == STATE_GAME and key in (b'k', b'K'):
+        boss_current_health = max(0, boss_current_health - 20)  # Reduce health by 20
+        if boss_current_health <= 0:
+            trigger_level_complete()
 
     if key == b" " and game_state == STATE_GAME:
         # call the same code as mouseListener
@@ -897,6 +976,11 @@ def showscreen():
         draw_settings()
         glutSwapBuffers()
         return
+    if game_state == STATE_LEVEL_COMPLETE:
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        show_level_complete_message()
+        glutSwapBuffers()
+        return
 
 
     glClear(GL_COLOR_BUFFER_BIT)
@@ -917,8 +1001,12 @@ def showscreen():
     glVertex3f(-GRID_LENGTH, 0, 0)
     glEnd()
 
-    draw_text(10,770, "Hello World")
-    draw_text(10,740, "Still A lot of kaaj baki")
+    # Draw level progress HUD
+    level_name = MAPS[current_level]["name"]
+    draw_text(10, 770, f"Level {current_level + 1}: {level_name}", color=(1, 1, 0))
+    draw_text(10, 740, "Boss Health:", color=(1, 0.5, 0.5))
+    progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
+    draw_progress_bar(120, 735, 200, 20, progress, color=(1, 0.2, 0.2))
 
     # world
     ex, ey, _ = camera_pos
