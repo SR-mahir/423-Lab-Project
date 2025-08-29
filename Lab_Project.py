@@ -951,7 +951,6 @@ def main():
     glutSpecialUpFunc(specialKeyUpListener)
     glutMouseFunc(mouseListener)
     glutIdleFunc(idle)
-
     glutMainLoop()
 
 if __name__  ==  "__main__":
