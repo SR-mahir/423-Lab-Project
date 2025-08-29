@@ -17,12 +17,20 @@ STATE_SETTINGS = 2
 STATE_LEVEL_COMPLETE = 3
 game_state = STATE_MENU
 
+# Weapon types
+WEAPON_GUN = 0
+WEAPON_GRENADE = 1
+current_weapon = WEAPON_GUN
+num_grenades = 3  # Starting number of grenades
+
 menu_options = ["New Game", "Settings", "Exit"]
 menu_index = 0
 
 # --- Player state (third-person target) ---
 player_pos = [0.0, 0.0, 0.0]  # (x, y, z), Z-up world
 player_yaw = 0.0              # radians; 0 faces +Y
+current_weapon = WEAPON_GUN   # Start with the gun
+num_grenades = 3              # Starting grenades
 
 # --- Camera state (decoupled yaw so you SEE player spin) ---
 camera_yaw = 0.0              # follows player_yaw with smoothing
@@ -38,6 +46,10 @@ CAM_FOLLOW_SPEED = 6.0        # rad/s, how fast camera yaw chases player_yaw
 CELL_SIZE   = 60.0
 WALL_HEIGHT = 120.0
 FLOOR_RGB   = (30, 30, 30)
+
+# Map dimensions (now much larger)
+MAP_WIDTH = 48  # 3x wider (was 16)
+MAP_HEIGHT = 96  # 3x taller (was 32)
 
 WALL_PALETTE = {
     1: (180, 180, 180),  # stone
@@ -87,6 +99,20 @@ MUSHY_LAND = [
  [3, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 3],
  [3, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 3],
  [3, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 3],
+ [3, _, _, 5, _, _, _, 5, _, _, _, 5, _, _, _, 3],
+ [3, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 3],
+ [3, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 3],
+ [3, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 3],
+ [1, 4, _, _, _, _, _, _, 4, _, _, 4, _, _, _, 1],
+ [1, 1, 3, 3, _, _, 3, 3, 1, 3, 3, 1, 3, 1, 1, 1],
+ [1, 1, 1, 3, _, _, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+ [1, 3, 3, 4, _, _, 4, 3, 3, 3, 3, 3, 3, 3, 3, 1],
+ [1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1],
+ [1, _, _, 3, 3, 3, 3, _, _, _, 2, 2, 2, _, _, 1],
+ [1, _, _, _, _, _, 4, _, _, _, _, _, 2, _, _, 1],
+ [1, _, _, _, _, _, 4, _, _, _, _, _, 2, _, _, 1],
+ [1, _, _, 3, 3, 3, 3, _, _, _, _, _, _, _, _, 1],
+ [1, _, _, _, _, _, _, _, _, _, _, _, _, _, _, 1],
  [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
 ]
 
@@ -176,6 +202,12 @@ LEVEL_COMPLETE_DELAY = 2.0  # seconds to show level complete message
 boss_health = 100  # Max boss health
 boss_current_health = 100  # Current boss health
 
+# ---------- Player Health System ----------
+PLAYER_MAX_HEALTH = 100
+player_current_health = PLAYER_MAX_HEALTH
+DAMAGE_COOLDOWN = 0.5  # seconds between damage
+last_damage_time = 0
+
 current_map_index = 0
 
 # These are populated by apply_map()
@@ -196,10 +228,18 @@ def apply_map(idx):
     reset_player()
 
 def reset_player():
-    global player_pos, player_yaw, camera_yaw
-    player_pos[:] = [0.0, 0.0, 0.0]
+    global player_pos, player_yaw, camera_yaw, player_current_health, current_weapon, num_grenades
+    # Position the player at the bottom of the map
+    # Calculate the position to be just in front of the bottom boundary
+    # Map is centered at (0,0), each cell is CELL_SIZE units
+    x_pos = 0.0  # Center of the map horizontally
+    y_pos = -((ROWS/2.0) - 1.5) * CELL_SIZE  # Near the bottom of the map, one cell up from boundary
+    player_pos[:] = [x_pos, y_pos, 0.0]
     player_yaw = 0.0
     camera_yaw = 0.0
+    player_current_health = PLAYER_MAX_HEALTH  # Restore full health on reset
+    current_weapon = WEAPON_GUN  # Reset to default weapon
+    num_grenades = 3  # Reset grenade count
 
 def trigger_level_complete():
     """Call this function when the boss is defeated"""
@@ -296,7 +336,7 @@ def draw_shapes():
     """Player with right arm that pivots at the SHOULDER and lifts forward to aim.
        Gun is modeled downward at rest, so it points forward when arm raises.
     """
-    global player_pos, player_yaw
+    global player_pos, player_yaw, current_weapon
     g = globals()
     arm_t = g.get('arm_t', 0.0)  # 0..1 animation progress
 
@@ -306,6 +346,13 @@ def draw_shapes():
         glScalef(sx, sy, sz)
         glColor3f(rgb[0], rgb[1], rgb[2])
         glutSolidCube(1.0)
+        glPopMatrix()
+
+    def sphere(cx, cy, cz, radius, rgb):
+        glPushMatrix()
+        glTranslatef(cx, cy, cz)
+        glColor3f(rgb[0], rgb[1], rgb[2])
+        glutSolidSphere(radius, 12, 12)
         glPopMatrix()
 
     glPushMatrix()
@@ -374,15 +421,22 @@ def draw_shapes():
 
     glPopMatrix()
 
-    # --- draw bullets ---
-    if 'bullets' in g:
-        glColor3f(1.0, 0.1, 0.1)
-        for b in g['bullets']:
-            bx, by, bz = b['pos']
-            glPushMatrix()
-            glTranslatef(bx, by, bz)
-            glutSolidSphere(4.0, 10, 10)
-            glPopMatrix()
+    # --- draw projectiles ---
+    if 'projectiles' in g:
+        for p in g['projectiles']:
+            px, py, pz = p['pos']
+            if p['type'] == 'bullet':
+                glColor3f(1.0, 0.1, 0.1)
+                sphere(px, py, pz, 4.0, (1.0, 0.1, 0.1))
+            elif p['type'] == 'grenade':
+                if p['ttl'] < 0.5:  # Blink when about to explode
+                    if int(p['ttl'] * 10) % 2:  # Flash effect
+                        glColor3f(1.0, 0.2, 0.2)
+                    else:
+                        glColor3f(0.2, 0.2, 0.2)
+                else:
+                    glColor3f(0.2, 0.2, 0.2)
+                sphere(px, py, pz, 6.0, (0.2, 0.2, 0.2))
 
 
 
@@ -496,17 +550,36 @@ def draw_settings():
 
 # ---------- Input ----------
 def keyboardListener(key, x, y):
-    """ASCII: O select, R back, ESC quit, WASD movement/strafe, K test boss damage."""
-    global game_state, menu_index, boss_current_health
+    """ASCII: O select, R back, ESC quit, WASD movement/strafe, K test boss damage, H test player damage, G switch weapons."""
+    global game_state, menu_index, boss_current_health, player_current_health, last_damage_time, current_weapon
 
     if isinstance(key, str):
         key = key.encode("utf-8")
+        
+    # Weapon switch with G
+    if game_state == STATE_GAME and key in (b'g', b'G'):
+        if current_weapon == WEAPON_GUN:
+            current_weapon = WEAPON_GRENADE
+        else:
+            current_weapon = WEAPON_GUN
+        print(f"Switched to {'GRENADE' if current_weapon == WEAPON_GRENADE else 'GUN'}")  # Debug print
+        glutPostRedisplay()
+        return
         
     # Test key for boss damage (K)
     if game_state == STATE_GAME and key in (b'k', b'K'):
         boss_current_health = max(0, boss_current_health - 20)  # Reduce health by 20
         if boss_current_health <= 0:
             trigger_level_complete()
+            
+    # Test key for player damage (H)
+    if game_state == STATE_GAME and key in (b'h', b'H'):
+        current_time = time.time()
+        if current_time - last_damage_time >= DAMAGE_COOLDOWN:
+            player_current_health = max(0, player_current_health - 10)  # Take 10 damage
+            last_damage_time = current_time
+            if player_current_health <= 0:
+                game_state = STATE_MENU  # Game over when player dies
 
     if key == b" " and game_state == STATE_GAME:
         # call the same code as mouseListener
@@ -621,14 +694,16 @@ def get_muzzle_world():
     return wx, wy, wz
 
 
-def spawn_bullet_from_gun():
-    """Spawn a bullet from the gun muzzle, aimed along the camera forward."""
+def spawn_projectile():
+    """Spawn a bullet or grenade from the gun muzzle."""
     g = globals()
-    if 'bullets' not in g: g['bullets'] = []
-
+    global num_grenades
+    
+    if 'projectiles' not in g: g['projectiles'] = []
+    
+    # Common spawn position calculation
     muzzle_side     = 22.0   # to the right of torso center
     muzzle_forward  = 100.0   # forward along facing
-    # Put it around the hand height (z_arm_center ~= 85); a touch lower feels right.
     leg_h, torso_h, arm_h = 50.0, 60.0, 50.0
     z_arm_center = leg_h + torso_h - arm_h * 0.5
     muzzle_height  = z_arm_center - 8.0
@@ -643,12 +718,30 @@ def spawn_bullet_from_gun():
     my = py + diry*muzzle_forward + ry*muzzle_side
     mz = pz + muzzle_height
 
-    BULLET_SPEED = 900.0
-    g['bullets'].append({
-        'pos': [mx, my, mz],
-        'vel': [dirx*BULLET_SPEED, diry*BULLET_SPEED, 0.0],
-        'ttl': 2.0
-    })
+    if current_weapon == WEAPON_GUN:
+        # Regular bullet
+        BULLET_SPEED = 900.0
+        g['projectiles'].append({
+            'type': 'bullet',
+            'pos': [mx, my, mz],
+            'vel': [dirx*BULLET_SPEED, diry*BULLET_SPEED, 0.0],
+            'ttl': 2.0
+        })
+    elif current_weapon == WEAPON_GRENADE and num_grenades > 0:
+        # Grenade with arc and bounce
+        GRENADE_SPEED = 400.0
+        GRENADE_VERTICAL_SPEED = 200.0
+        g['projectiles'].append({
+            'type': 'grenade',
+            'pos': [mx, my, mz],
+            'vel': [dirx*GRENADE_SPEED, diry*GRENADE_SPEED, GRENADE_VERTICAL_SPEED],
+            'ttl': 3.0,
+            'bounces': 0,
+            'max_bounces': 2,
+            'damage_radius': 150.0,
+            'damage': 50
+        })
+        num_grenades -= 1  # Use up one grenade
 
 
 def mouseListener(button, state, x, y):
@@ -825,30 +918,82 @@ def idle():
             g['pending_shot'] = False
             g['shot_fired_this_raise'] = False
 
-    # Gun shot interval handleing
+    # Gun shot interval handling
     if (g['arm_t'] >= 1.0 and
         g.get('pending_shot', False) and
         not g.get('shot_fired_this_raise', False)):
         now = time.time()
         if now - g['last_shot_time'] >= FIRE_COOLDOWN:
             g['last_shot_time'] = now
-            spawn_bullet_from_gun()
+            spawn_projectile()
             g['shot_fired_this_raise'] = True
 
-
-    # --- bullets update + cull on walls or TTL ---
-    new_bullets = []
-    for b in g['bullets']:
-        b['ttl'] -= dt
-        if b['ttl'] <= 0: continue
-        bx, by, bz = b['pos']
-        bvx, bvy, bvz = b['vel']
-        nx, ny, nz = bx + bvx*dt, by + bvy*dt, bz + bvz*dt
-        if is_wall_at(nx, ny):
+    # --- projectiles update + collision handling ---
+    GRAVITY = -600.0  # Gravity for grenades
+    if 'projectiles' not in g: g['projectiles'] = []
+    new_projectiles = []
+    
+    for p in g['projectiles']:
+        p['ttl'] -= dt
+        if p['ttl'] <= 0:
+            # Grenade explosion at end of life
+            if p['type'] == 'grenade':
+                # Check for enemies in blast radius
+                px, py, pz = p['pos']
+                radius = p['damage_radius']
+                if abs(px) < radius and abs(py) < radius:  # Simple radius check
+                    # Apply explosion damage to boss if in range
+                    global boss_current_health
+                    boss_current_health = max(0, boss_current_health - p['damage'])
+                    if boss_current_health <= 0:
+                        trigger_level_complete()
             continue
-        b['pos'][:] = [nx, ny, nz]
-        new_bullets.append(b)
-    g['bullets'] = new_bullets
+
+        # Update position
+        px, py, pz = p['pos']
+        vx, vy, vz = p['vel']
+        
+        if p['type'] == 'grenade':
+            # Apply gravity to grenades
+            vz += GRAVITY * dt
+            p['vel'][2] = vz  # Update vertical velocity
+            
+        # Calculate new position
+        nx = px + vx * dt
+        ny = py + vy * dt
+        nz = pz + vz * dt
+        
+        # Handle wall collisions
+        wall_hit = is_wall_at(nx, ny)
+        if wall_hit:
+            if p['type'] == 'bullet':
+                continue  # Bullets are destroyed on wall hit
+            elif p['type'] == 'grenade':
+                if p['bounces'] >= p['max_bounces']:
+                    continue  # Grenade is destroyed after max bounces
+                    
+                # Simple bounce - reverse velocity and reduce it
+                p['vel'][0] *= -0.6  # Reduce horizontal velocity
+                p['vel'][1] *= -0.6
+                p['vel'][2] *= 0.5   # Reduce vertical velocity more
+                p['bounces'] += 1
+                
+                # Use previous position to avoid wall penetration
+                nx, ny = px, py
+        
+        # Keep grenades above ground
+        if p['type'] == 'grenade' and nz < 0:
+            nz = 0
+            p['vel'][2] *= -0.5  # Bounce off ground with reduced velocity
+            p['bounces'] += 1
+            if p['bounces'] >= p['max_bounces']:
+                continue  # Destroy after max bounces
+        
+        # Update position
+        p['pos'][:] = [nx, ny, nz]
+        new_projectiles.append(p)
+    
+    g['projectiles'] = new_projectiles
 
     glutPostRedisplay()
 
@@ -1004,9 +1149,22 @@ def showscreen():
     # Draw level progress HUD
     level_name = MAPS[current_level]["name"]
     draw_text(10, 770, f"Level {current_level + 1}: {level_name}", color=(1, 1, 0))
-    draw_text(10, 740, "Boss Health:", color=(1, 0.5, 0.5))
-    progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
-    draw_progress_bar(120, 735, 200, 20, progress, color=(1, 0.2, 0.2))
+    
+    # Draw Boss Health
+    draw_text(10, 740, "Boss Damage:", color=(1, 0.5, 0.5))
+    boss_progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
+    draw_progress_bar(120, 735, 200, 20, boss_progress, color=(1, 0.2, 0.2))
+    
+    # Draw Player Health
+    draw_text(10, 710, "Player Health:", color=(0.5, 1, 0.5))
+    player_progress = player_current_health / PLAYER_MAX_HEALTH
+    draw_progress_bar(120, 705, 200, 20, player_progress, color=(0.2, 1, 0.2))
+    
+    # Draw Weapon Info
+    weapon_text = "GRENADE ({})" if current_weapon == WEAPON_GRENADE else "GUN"
+    weapon_text = weapon_text.format(num_grenades) if current_weapon == WEAPON_GRENADE else weapon_text
+    draw_text(10, 680, f"Weapon: {weapon_text}", color=(1, 1, 1))
+    draw_text(10, 660, "Press G to switch weapon", color=(0.8, 0.8, 0.8))
 
     # world
     ex, ey, _ = camera_pos
