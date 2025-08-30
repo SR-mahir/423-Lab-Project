@@ -14,8 +14,35 @@ GRID_LENGTH = 600
 STATE_MENU     = 0
 STATE_GAME     = 1
 STATE_SETTINGS = 2
-STATE_LEVEL_COMPLETE = 3
+STATE_BOSS_ARENA = 3
+STATE_LEVEL_COMPLETE = 4
 game_state = STATE_MENU
+
+# Global constants
+WIDTH  = 1200
+HEIGHT = 800
+CELL_SIZE = 100.0
+WALL_HEIGHT = 120.0
+
+# Boss battle variables and constants
+BOSS_BULLET_DAMAGE = 15
+BULLET_DAMAGE_TO_BOSS = 5  # Percentage
+GRENADE_DAMAGE_TO_BOSS = 15  # Percentage
+BOSS_TEXT_VISIBLE_DISTANCE = 500  # Distance at which "Fight Boss" text becomes visible
+
+# Boss properties - will scale with level
+base_boss_health = 100
+boss_health = base_boss_health
+boss_size = 100.0
+base_boss_attack_cooldown = 2.0
+boss_attack_cooldown = base_boss_attack_cooldown
+
+# Boss state variables - all initialized here
+boss_pos = [0, 0, 0]  # Will be centered in arena
+boss_current_health = boss_health
+boss_last_attack_time = 0
+boss_projectiles = []
+boss_damage_flash = 0  # For visual feedback when boss takes damage
 
 # Weapon types
 WEAPON_GUN = 0
@@ -116,7 +143,6 @@ MUSHY_LAND = [
  [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
 ]
 
-# 2) Arena Cross (wide center + plus-shaped lanes + sparse cover)
 ARENA_CROSS = [
  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
  [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
@@ -152,7 +178,6 @@ ARENA_CROSS = [
  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
 ]
 
-# 3) Courtyard Loop (outer ring + four gates + central courtyard + cover pockets)
 COURTYARD_LOOP = [
  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
  [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
@@ -188,6 +213,25 @@ COURTYARD_LOOP = [
  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
 ]
 
+BOSS_ARENA = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,1,1,1,_,_,_,_,_,_,_,_,1,1,1,1],
+    [1,1,_,_,_,_,_,_,_,_,_,_,_,_,1,1],
+    [1,1,_,_,_,_,_,_,_,_,_,_,_,_,1,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,_,_,_,_,_,_,_,_,_,_,_,_,_,_,1],
+    [1,1,_,_,_,_,_,_,_,_,_,_,_,_,1,1],
+    [1,1,_,_,_,_,_,_,_,_,_,_,_,_,1,1],
+    [1,1,1,1,_,_,_,_,_,_,_,_,1,1,1,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+]
+
 MAPS = [
     {"name": "Mushy Land",    "grid": MUSHY_LAND,     "floor": (30, 30, 30)},
     {"name": "Arena Cross",   "grid": ARENA_CROSS,    "floor": (26, 26, 30)},
@@ -199,6 +243,43 @@ current_level = 0
 max_levels = len(MAPS)
 level_complete_time = 0
 LEVEL_COMPLETE_DELAY = 2.0  # seconds to show level complete message
+
+def check_boss_trigger():
+    """Check if player has reached far enough in the level to trigger boss fight"""
+    global game_state, boss_current_health, boss_pos, player_pos, boss_projectiles, boss_health, boss_attack_cooldown
+    py = player_pos[1]  # Y position
+    trigger_y = CELL_SIZE * (ROWS/2 - 4)  # Near the end of the map
+    
+    if game_state == STATE_GAME and py > trigger_y:
+        # Scale boss difficulty with current level
+        level_multiplier = 1.0 + (current_level * 0.3)  # 30% harder each level
+        boss_health = int(base_boss_health * level_multiplier)
+        boss_attack_cooldown = max(0.5, base_boss_attack_cooldown - (current_level * 0.2))  # Faster attacks
+        
+        # Reset boss health and position for the fight
+        boss_current_health = boss_health
+        boss_pos[0] = 0  # Center of arena
+        boss_pos[1] = 0
+        boss_pos[2] = boss_size/2  # Place boss on the ground
+        boss_projectiles.clear()
+        
+        # Move player to arena - position them properly on the ground
+        player_pos[0] = 0  # Center bottom of arena
+        player_pos[1] = -CELL_SIZE * 4  # Near bottom of arena but not too close to walls
+        player_pos[2] = 0  # On the ground
+        
+        # Switch to boss arena
+        game_state = STATE_BOSS_ARENA
+        apply_boss_arena()
+
+def apply_boss_arena():
+    """Switch to boss arena map"""
+    global MINI_MAP, ROWS, COLS, WORLD_MAP, FLOOR_RGB
+    MINI_MAP = [row[:] for row in BOSS_ARENA]
+    ROWS, COLS = len(MINI_MAP), len(MINI_MAP[0])
+    WORLD_MAP = {(x, y): v for y, row in enumerate(MINI_MAP) 
+                for x, v in enumerate(row) if v != 0}
+    FLOOR_RGB = (20, 20, 25)  # Darker floor for boss arena
 boss_health = 100  # Max boss health
 boss_current_health = 100  # Current boss health
 
@@ -216,19 +297,26 @@ ROWS, COLS = 0, 0
 WORLD_MAP = {}
 def apply_map(idx):
     """Switch current map, rebuild derived data, recenter player/camera."""
-    global current_map_index, MINI_MAP, ROWS, COLS, WORLD_MAP, FLOOR_RGB, boss_current_health
+    global current_map_index, MINI_MAP, ROWS, COLS, WORLD_MAP, FLOOR_RGB
+    global boss_current_health, boss_health, boss_attack_cooldown
     current_map_index = idx % len(MAPS)
     MINI_MAP = [row[:] for row in MAPS[current_map_index]["grid"]]
     ROWS, COLS = len(MINI_MAP), len(MINI_MAP[0])
     WORLD_MAP = {(x, y): v for y, row in enumerate(MINI_MAP) for x, v in enumerate(row) if v != 0}
     FLOOR_RGB = MAPS[current_map_index]["floor"]
+    
+    # Scale boss difficulty with level
+    level_multiplier = 1.0 + (current_map_index * 0.3)  # 30% harder each level
+    boss_health = int(base_boss_health * level_multiplier)
+    boss_attack_cooldown = max(0.5, base_boss_attack_cooldown - (current_map_index * 0.2))  # Faster attacks
+    
     # Reset boss health for new level
     boss_current_health = boss_health
     # recenter player and face forward
     reset_player()
 
 def reset_player():
-    global player_pos, player_yaw, camera_yaw, player_current_health, current_weapon, num_grenades
+    global player_pos, player_yaw, camera_yaw, player_current_health, current_weapon, num_grenades, boss_current_health
     # Position the player at the bottom of the map
     # Calculate the position to be just in front of the bottom boundary
     # Map is centered at (0,0), each cell is CELL_SIZE units
@@ -240,6 +328,16 @@ def reset_player():
     player_current_health = PLAYER_MAX_HEALTH  # Restore full health on reset
     current_weapon = WEAPON_GUN  # Reset to default weapon
     num_grenades = 3  # Reset grenade count
+    
+    # Reset boss health when player is reset (for game restart)
+    boss_current_health = boss_health
+    
+    # Reset input state to prevent stuck keys
+    g = globals()
+    if 'arrow_state' in g:
+        g['arrow_state'].clear()
+    if 'key_state' in g:
+        g['key_state'].clear()
 
 def trigger_level_complete():
     """Call this function when the boss is defeated"""
@@ -306,6 +404,12 @@ def show_level_complete_message():
                 current_level += 1
                 apply_map(current_level)
                 reset_player()
+                # Reset camera and input state for new level
+                g = globals()
+                if 'arrow_state' in g:
+                    g['arrow_state'].clear()
+                if 'key_state' in g:
+                    g['key_state'].clear()
                 game_state = STATE_GAME
             else:
                 game_state = STATE_MENU  # Game completed, return to menu
@@ -314,18 +418,19 @@ def show_level_complete_message():
             draw_centered_text(WIDTH/2, HEIGHT/2, "Level Complete!", 
                             GLUT_BITMAP_HELVETICA_18, (1, 1, 0))
             if current_level < max_levels - 1:
-                draw_centered_text(WIDTH/2, HEIGHT/2 - 40, 
-                                "Loading next level...",
-                                GLUT_BITMAP_HELVETICA_12, (1, 1, 1))
+                            draw_centered_text(WIDTH/2, HEIGHT/2 - 40, 
+                            "Loading next level...",
+                            GLUT_BITMAP_HELVETICA_18, (1, 1, 1))
             else:
                 draw_centered_text(WIDTH/2, HEIGHT/2 - 40, 
                                 "Congratulations! Game Complete!",
-                                GLUT_BITMAP_HELVETICA_12, (1, 1, 0))
+                                GLUT_BITMAP_HELVETICA_18, (1, 1, 0))
 
 def draw_centered_text(cx, y, s, font=GLUT_BITMAP_HELVETICA_18, rgb=(1,1,1)):
-    def text_w(s, font):
-        return sum(glutBitmapWidth(font, ord(ch)) for ch in s)
-    w = text_w(s, font)
+    # Estimate text width since glutBitmapWidth is not available in intro file
+    # Approximate width based on character count and font size
+    char_width = 10  # Approximate width per character for HELVETICA_18
+    w = len(s) * char_width
     glColor3f(*rgb)
     glRasterPos2f(cx - w/2.0, y)
     for ch in s:
@@ -336,7 +441,7 @@ def draw_shapes():
     """Player with right arm that pivots at the SHOULDER and lifts forward to aim.
        Gun is modeled downward at rest, so it points forward when arm raises.
     """
-    global player_pos, player_yaw, current_weapon
+    global player_pos, player_yaw, current_weapon, game_state
     g = globals()
     arm_t = g.get('arm_t', 0.0)  # 0..1 animation progress
 
@@ -352,7 +457,7 @@ def draw_shapes():
         glPushMatrix()
         glTranslatef(cx, cy, cz)
         glColor3f(rgb[0], rgb[1], rgb[2])
-        glutSolidSphere(radius, 12, 12)
+        gluSphere(gluNewQuadric(), radius, 12, 12)
         glPopMatrix()
 
     glPushMatrix()
@@ -420,6 +525,55 @@ def draw_shapes():
     box(base_x, base_y, z_head_center, head_s, head_s, head_s, clr_head)
 
     glPopMatrix()
+
+    # Draw the boss if in boss arena
+    if game_state == STATE_BOSS_ARENA:
+        glPushMatrix()
+        bx, by, bz = boss_pos
+        glTranslatef(bx, by, bz)
+        
+        # Main body (large cube) - positioned like a wall/obstacle
+        # Flash white when taking damage
+        if boss_damage_flash > 0:
+            glColor3f(1.0, 1.0, 1.0)  # White flash
+        else:
+            glColor3f(0.8, 0.2, 0.2)  # Red color
+        glPushMatrix()
+        glScalef(boss_size, boss_size, boss_size)
+        glutSolidCube(1.0)
+        glPopMatrix()
+        
+        # Eyes (two smaller cubes) - positioned to face the player
+        glColor3f(1.0, 1.0, 0.0)  # Yellow eyes
+        glPushMatrix()
+        glTranslatef(-boss_size/4, -boss_size/2, boss_size/3)
+        glScalef(boss_size/8, boss_size/8, boss_size/8)
+        glutSolidCube(1.0)
+        glPopMatrix()
+        
+        glPushMatrix()
+        glTranslatef(boss_size/4, -boss_size/2, boss_size/3)
+        glScalef(boss_size/8, boss_size/8, boss_size/8)
+        glutSolidCube(1.0)
+        glPopMatrix()
+        
+        # Add some details to make it look more menacing
+        glColor3f(0.6, 0.1, 0.1)  # Darker red for details
+        glPushMatrix()
+        glTranslatef(0, 0, -boss_size/2 - 5)
+        glScalef(boss_size, boss_size, 10)
+        glutSolidCube(1.0)
+        glPopMatrix()
+        
+        glPopMatrix()
+        
+        # Draw boss projectiles (fire balls)
+        for proj in boss_projectiles:
+            glPushMatrix()
+            glTranslatef(*proj['pos'])
+            glColor3f(1.0, 0.5, 0.0)  # Orange color for fire
+            gluSphere(gluNewQuadric(), 10.0, 10, 10)
+            glPopMatrix()
 
     # --- draw projectiles ---
     if 'projectiles' in g:
@@ -492,7 +646,7 @@ def draw_menu():
 
     draw_centered_text(WIDTH/2.0, 24,
                        "Use ↑/↓, 'O' to select, 'R' to return, ESC to quit",
-                       GLUT_BITMAP_HELVETICA_12, CLR_TEXT_DIM)
+                       GLUT_BITMAP_HELVETICA_18, CLR_TEXT_DIM)
 
     glPopMatrix()
     glMatrixMode(GL_PROJECTION)
@@ -541,7 +695,7 @@ def draw_settings():
 
     draw_centered_text(WIDTH/2.0, panel_y + 56,
                        "LEFT/RIGHT to change map  |  'O' to confirm  |  'R' to go back",
-                       GLUT_BITMAP_HELVETICA_12, CLR_TEXT_DIM)
+                       GLUT_BITMAP_HELVETICA_18, CLR_TEXT_DIM)
 
     glPopMatrix()
     glMatrixMode(GL_PROJECTION)
@@ -557,7 +711,7 @@ def keyboardListener(key, x, y):
         key = key.encode("utf-8")
         
     # Weapon switch with G
-    if game_state == STATE_GAME and key in (b'g', b'G'):
+    if (game_state == STATE_GAME or game_state == STATE_BOSS_ARENA) and key in (b'g', b'G'):
         if current_weapon == WEAPON_GUN:
             current_weapon = WEAPON_GRENADE
         else:
@@ -579,9 +733,13 @@ def keyboardListener(key, x, y):
             player_current_health = max(0, player_current_health - 10)  # Take 10 damage
             last_damage_time = current_time
             if player_current_health <= 0:
-                game_state = STATE_MENU  # Game over when player dies
+                # Player died - restart the game
+                game_state = STATE_MENU
+                current_level = 0
+                apply_map(0)
+                reset_player()
 
-    if key == b" " and game_state == STATE_GAME:
+    if key == b" " and (game_state == STATE_GAME or game_state == STATE_BOSS_ARENA):
         # call the same code as mouseListener
         mouseListener(GLUT_LEFT_BUTTON, GLUT_DOWN, x, y)
         return
@@ -670,7 +828,7 @@ def specialKeyListener(key, x, y):
 def specialKeyUpListener(key, x, y):
     g = globals()
     if 'arrow_state' not in g: g['arrow_state'] = set()
-    if game_state == STATE_GAME:
+    if game_state == STATE_GAME or game_state == STATE_BOSS_ARENA:
         if key == GLUT_KEY_LEFT:
             g['arrow_state'].discard('left')
         elif key == GLUT_KEY_RIGHT:
@@ -756,7 +914,7 @@ def mouseListener(button, state, x, y):
     if 'pending_shot' not in g: g['pending_shot'] = False
     if 'shot_fired_this_raise' not in g: g['shot_fired_this_raise'] = False
 
-    if button == GLUT_LEFT_BUTTON and state == GLUT_DOWN and game_state == STATE_GAME:
+    if button == GLUT_LEFT_BUTTON and state == GLUT_DOWN and (game_state == STATE_GAME or game_state == STATE_BOSS_ARENA):
         # Queue a shot and start/refresh the raise animation.
         g['pending_shot'] = True
         g['arm_anim'], g['arm_timer'] = 'raising', 0.0
@@ -816,7 +974,8 @@ def idle():
     WASD movement uses the player's current facing (aligned to camera).
     Also updates arm raise animation and bullet physics/collision.
     """
-    global player_pos, player_yaw, camera_yaw
+    global player_pos, player_yaw, camera_yaw, boss_current_health, boss_last_attack_time
+    global game_state, player_current_health, boss_pos, boss_projectiles, boss_health, boss_damage_flash
 
     g = globals()
     if 'last_time' not in g: g['last_time'] = time.time()
@@ -839,7 +998,7 @@ def idle():
     R           = 18.0
 
     # --- camera rotation from LEFT/RIGHT arrows ---
-    if game_state == STATE_GAME:
+    if game_state == STATE_GAME or game_state == STATE_BOSS_ARENA:
         if 'left' in g['arrow_state']:
             camera_yaw -= ROT_SPEED * dt
         if 'right' in g['arrow_state']:
@@ -880,12 +1039,25 @@ def idle():
         return (cx, cy) in WORLD_MAP
 
     def blocked(nx, ny):
-        return (
+        # Check wall collisions
+        wall_blocked = (
             is_wall_at(nx - R, ny) or
             is_wall_at(nx + R, ny) or
             is_wall_at(nx, ny - R) or
             is_wall_at(nx, ny + R)
         )
+        
+        # Check boss collision if in boss arena
+        if game_state == STATE_BOSS_ARENA:
+            bx, by, _ = boss_pos
+            dx = nx - bx
+            dy = ny - by
+            # Check if player would collide with boss (boss is a cube with size boss_size)
+            if (abs(dx) < R + boss_size/2 and 
+                abs(dy) < R + boss_size/2):
+                return True
+        
+        return wall_blocked
 
     # integrate + collide (X then Y)
     x, y, z = player_pos
@@ -894,6 +1066,91 @@ def idle():
     new_y = y + vy * dt
     if blocked(new_x, new_y): new_y = y
     player_pos = [new_x, new_y, z]
+    
+    # Check for boss trigger
+    check_boss_trigger()
+    
+    # Boss attack logic when in arena
+    if game_state == STATE_BOSS_ARENA:
+        now = time.time()
+        if now - boss_last_attack_time >= boss_attack_cooldown:
+            # Calculate direction to player
+            px, py, pz = player_pos
+            bx, by, bz = boss_pos
+            dx = px - bx
+            dy = py - by
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist > 0:  # Avoid division by zero
+                # Normalize direction
+                dx /= dist
+                dy /= dist
+                
+                # Create multiple fire projectiles in a spread pattern
+                base_fire_speed = 300.0
+                level_speed_boost = current_map_index * 50.0  # 50 units faster per level
+                FIRE_SPEED = base_fire_speed + level_speed_boost
+                
+                # Fire 5 projectiles in a spread pattern
+                spread_angles = [-30, -15, 0, 15, 30]  # Degrees
+                for angle in spread_angles:
+                    # Convert angle to radians
+                    angle_rad = math.radians(angle)
+                    
+                    # Rotate the direction vector by the spread angle
+                    cos_angle = math.cos(angle_rad)
+                    sin_angle = math.sin(angle_rad)
+                    spread_dx = dx * cos_angle - dy * sin_angle
+                    spread_dy = dx * sin_angle + dy * cos_angle
+                    
+                    boss_projectiles.append({
+                        'pos': [bx, by, bz + boss_size/2],
+                        'vel': [spread_dx * FIRE_SPEED, spread_dy * FIRE_SPEED, 0],
+                        'ttl': 3.0
+                    })
+                
+                boss_last_attack_time = now
+    
+    # Update boss projectiles
+    new_projectiles = []
+    for proj in boss_projectiles:
+        proj['ttl'] -= dt
+        if proj['ttl'] <= 0:
+            continue
+        
+        # Update position
+        px, py, pz = proj['pos']
+        vx, vy, vz = proj['vel']
+        nx = px + vx * dt
+        ny = py + vy * dt
+        nz = pz + vz * dt
+        
+        # Check for collision with player
+        dx = nx - player_pos[0]
+        dy = ny - player_pos[1]
+        if dx*dx + dy*dy < 400:  # Hit radius
+            player_current_health = max(0, player_current_health - BOSS_BULLET_DAMAGE)
+            if player_current_health <= 0:
+                # Player died - restart the game
+                game_state = STATE_MENU
+                current_level = 0
+                apply_map(0)
+                reset_player()
+            continue
+        
+        # Check for wall collision
+        if is_wall_at(nx, ny):
+            continue  # Destroy projectile on wall hit
+        
+        proj['pos'] = [nx, ny, nz]
+        new_projectiles.append(proj)
+    
+    boss_projectiles[:] = new_projectiles
+    
+    # Update boss damage flash timer
+    if boss_damage_flash > 0:
+        boss_damage_flash -= dt
+        if boss_damage_flash < 0:
+            boss_damage_flash = 0
 
     #ARM raise help
     RAISE_TIME = 0.08
@@ -932,19 +1189,20 @@ def idle():
     GRAVITY = -600.0  # Gravity for grenades
     if 'projectiles' not in g: g['projectiles'] = []
     new_projectiles = []
+    global boss_current_health  # Move global declaration to start of function
     
     for p in g['projectiles']:
         p['ttl'] -= dt
         if p['ttl'] <= 0:
-            # Grenade explosion at end of life
-            if p['type'] == 'grenade':
-                # Check for enemies in blast radius
+            # Handle grenade explosion damage
+            if p['type'] == 'grenade' and game_state == STATE_BOSS_ARENA:
                 px, py, pz = p['pos']
-                radius = p['damage_radius']
-                if abs(px) < radius and abs(py) < radius:  # Simple radius check
-                    # Apply explosion damage to boss if in range
-                    global boss_current_health
-                    boss_current_health = max(0, boss_current_health - p['damage'])
+                bx, by, _ = boss_pos
+                dx = px - bx
+                dy = py - by
+                if dx*dx + dy*dy < p['damage_radius']*p['damage_radius']:
+                    # Apply grenade damage to boss if in range
+                    boss_current_health = max(0, boss_current_health - boss_health * (GRENADE_DAMAGE_TO_BOSS/100.0))
                     if boss_current_health <= 0:
                         trigger_level_complete()
             continue
@@ -962,6 +1220,32 @@ def idle():
         nx = px + vx * dt
         ny = py + vy * dt
         nz = pz + vz * dt
+        
+        # Check for boss collision if in boss arena
+        if game_state == STATE_BOSS_ARENA:
+            bx, by, bz = boss_pos
+            dx = nx - bx
+            dy = ny - by
+            dz = nz - bz
+            # Check if projectile hits the boss (boss is a cube with size boss_size)
+            if (abs(dx) < boss_size/2 and 
+                abs(dy) < boss_size/2 and 
+                abs(dz) < boss_size/2):
+                # Apply damage to boss
+                if p['type'] == 'bullet':
+                    boss_current_health = max(0, boss_current_health - boss_health * (BULLET_DAMAGE_TO_BOSS/100.0))
+                elif p['type'] == 'grenade':
+                    boss_current_health = max(0, boss_current_health - boss_health * (GRENADE_DAMAGE_TO_BOSS/100.0))
+                
+                # Flash effect when taking damage
+                boss_damage_flash = 0.2  # Flash for 0.2 seconds
+                
+                # Check if boss is defeated
+                if boss_current_health <= 0:
+                    trigger_level_complete()
+                
+                # Destroy projectile
+                continue
         
         # Handle wall collisions
         wall_hit = is_wall_at(nx, ny)
@@ -1147,24 +1431,46 @@ def showscreen():
     glEnd()
 
     # Draw level progress HUD
-    level_name = MAPS[current_level]["name"]
-    draw_text(10, 770, f"Level {current_level + 1}: {level_name}", color=(1, 1, 0))
+    if game_state == STATE_BOSS_ARENA:
+        draw_text(10, 770, f"Level {current_level + 1}: BOSS ARENA", color=(1, 0.5, 0))
+    else:
+        level_name = MAPS[current_level]["name"]
+        draw_text(10, 770, f"Level {current_level + 1}: {level_name}", color=(1, 1, 0))
     
     # Draw Boss Health
-    draw_text(10, 740, "Boss Damage:", color=(1, 0.5, 0.5))
-    boss_progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
-    draw_progress_bar(120, 735, 200, 20, boss_progress, color=(1, 0.2, 0.2))
+    if game_state == STATE_BOSS_ARENA:
+        draw_text(10, 740, f"BOSS HEALTH (Level {current_level + 1}):", color=(1, 0.5, 0.5))
+        boss_progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
+        draw_progress_bar(120, 735, 200, 20, boss_progress, color=(1, 0.2, 0.2))
+        draw_text(330, 740, f"{boss_current_health}/{boss_health}", color=(1, 1, 1))
+    else:
+        draw_text(10, 740, "Boss Damage:", color=(1, 0.5, 0.5))
+        boss_progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
+        draw_progress_bar(120, 735, 200, 20, boss_progress, color=(1, 0.2, 0.2))
     
     # Draw Player Health
     draw_text(10, 710, "Player Health:", color=(0.5, 1, 0.5))
-    player_progress = player_current_health / PLAYER_MAX_HEALTH
+    player_progress = max(0, player_current_health / PLAYER_MAX_HEALTH)  # Ensure progress doesn't go negative
     draw_progress_bar(120, 705, 200, 20, player_progress, color=(0.2, 1, 0.2))
+    draw_text(330, 710, f"{max(0, player_current_health)}/{PLAYER_MAX_HEALTH}", color=(1, 1, 1))
     
     # Draw Weapon Info
     weapon_text = "GRENADE ({})" if current_weapon == WEAPON_GRENADE else "GUN"
     weapon_text = weapon_text.format(num_grenades) if current_weapon == WEAPON_GRENADE else weapon_text
     draw_text(10, 680, f"Weapon: {weapon_text}", color=(1, 1, 1))
     draw_text(10, 660, "Press G to switch weapon", color=(0.8, 0.8, 0.8))
+
+    # Draw "Fight Boss" text when near the trigger area
+    if game_state == STATE_GAME:
+        trigger_y = CELL_SIZE * (ROWS/2 - 4)  # Same as in check_boss_trigger
+        distance_to_trigger = abs(trigger_y - player_pos[1])
+        if distance_to_trigger < BOSS_TEXT_VISIBLE_DISTANCE:
+            # Make text pulse and get bigger as player gets closer
+            pulse = math.sin(time.time() * 4) * 0.2 + 0.8  # Pulsing effect
+            size_scale = 1 + (1 - distance_to_trigger/BOSS_TEXT_VISIBLE_DISTANCE)  # Gets bigger as you get closer
+            draw_text(WIDTH/2 - 100, HEIGHT/2, "⚔️ FIGHT BOSS ⚔️", 
+                     font=GLUT_BITMAP_HELVETICA_18,
+                     color=(1.0, pulse, pulse))
 
     # world
     ex, ey, _ = camera_pos
