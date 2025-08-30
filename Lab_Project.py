@@ -3,6 +3,7 @@ from OpenGL.GLUT import *
 from OpenGL.GLU import *
 import math
 import time
+import random
 
 WIDTH, HEIGHT = 1000, 800
 camera_pos = (0,500,500)
@@ -48,7 +49,40 @@ boss_damage_flash = 0  # For visual feedback when boss takes damage
 WEAPON_GUN = 0
 WEAPON_GRENADE = 1
 current_weapon = WEAPON_GUN
-num_grenades = 3  # Starting number of grenades
+num_grenades = 3  
+
+# --- Extra weapon ---
+WEAPON_KNIFE = 2
+
+# --- Crouch / hitbox ---
+PLAYER_RADIUS = 18.0
+is_crouching = False  # toggled with 'C'
+
+# --- Bots (simple chasers) ---
+bots = []  # each: {'pos':[x,y,z], 'hp':int, 'speed':float, 'last_attack':float}
+BOT_MAX = 6
+BOT_SPAWN_COOLDOWN = 3.0
+BOT_SPEED = 150.0
+BOT_HP = 35
+BOT_TOUCH_RANGE = 24.0
+BOT_ATTACK_COOLDOWN = 0.6
+BOT_TOUCH_DAMAGE = 8
+_last_bot_spawn = 0.0
+
+# --- Item drops ---
+items = []  # each: {'type':'health'|'upgrade', 'pos':[x,y,z], 'upgrade':'speed'|'multi', 'value':...}
+PICKUP_RANGE = 30.0
+
+# --- Player upgrades (affect gun only) ---
+gun_speed_mult = 1.0   # bullet speed multiplier
+multi_shot = False     # shoot a 3-round spread
+
+# --- Knife config ---
+KNIFE_RANGE = 120.0
+KNIFE_ARC_DEG = 60.0
+KNIFE_DAMAGE_TO_BOT = 9999  # one-hit kill on bots
+KNIFE_DAMAGE_TO_BOSS_PCT = 8.0  # percent of boss max per hit
+# Starting number of grenades
 
 menu_options = ["New Game", "Settings", "Exit"]
 menu_index = 0
@@ -351,7 +385,7 @@ def draw_text(x,y, text,font=GLUT_BITMAP_HELVETICA_18, color=(1,1,1)):
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
     glLoadIdentity()
-    gluOrtho2D(0, 1000, 0, 800)
+    gluOrtho2D(0, WIDTH, 0, HEIGHT)
     glMatrixMode(GL_MODELVIEW)
     glPushMatrix()
     glLoadIdentity()
@@ -367,7 +401,7 @@ def draw_progress_bar(x, y, width, height, progress, color=(1,1,1)):
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
     glLoadIdentity()
-    gluOrtho2D(0, 1000, 0, 800)
+    gluOrtho2D(0, WIDTH, 0, HEIGHT)
     glMatrixMode(GL_MODELVIEW)
     glPushMatrix()
     glLoadIdentity()
@@ -510,13 +544,23 @@ def draw_shapes():
     # arm
     box(0.0, 0.0, 0.0, arm_w, arm_d, arm_h, clr_arms)
 
-    # Gun (pointing downward in rest pose)
+    # Held item: gun/grenade model vs knife
     glPushMatrix()
-    glTranslatef(0.0, 10.0, -arm_h)  # to wrist/hand
-    glRotatef(-90, 1, 0, 0)          # tilt gun downward
-    box(4.0,  6.0, 0.0,  12.0, 8.0, 8.0,  clr_gun)
-    box(6.0, 22.0, 0.0,   6.0, 28.0, 6.0, clr_gun)
-    box(6.0, 10.0, 6.0,   4.0, 10.0, 4.0, clr_gun)
+    glTranslatef(0.0, 10.0, -arm_h)  # wrist/hand anchor
+    if current_weapon == WEAPON_KNIFE:
+        glRotatef(-90, 1, 0, 0)
+        # handle
+        box(4.0,  6.0, 0.0,  6.0, 8.0, 10.0,  (0.2, 0.2, 0.2))
+        # guard
+        box(6.0, 16.0, 0.0,  10.0, 2.0, 4.0,  (0.25, 0.25, 0.25))
+        # blade
+        box(6.0, 35.0, 0.0,  4.0, 36.0, 2.0,  (0.8, 0.8, 0.85))
+    else:
+        # Gun (pointing downward in rest pose)
+        glRotatef(-90, 1, 0, 0)          # tilt gun downward
+        box(4.0,  6.0, 0.0,  12.0, 8.0, 8.0,  clr_gun)
+        box(6.0, 22.0, 0.0,   6.0, 28.0, 6.0, clr_gun)
+        box(6.0, 10.0, 6.0,   4.0, 10.0, 4.0, clr_gun)
     glPopMatrix()
 
     glPopMatrix()
@@ -719,6 +763,25 @@ def keyboardListener(key, x, y):
         print(f"Switched to {'GRENADE' if current_weapon == WEAPON_GRENADE else 'GUN'}")  # Debug print
         glutPostRedisplay()
         return
+
+    # Quick weapon hotkeys
+    if (game_state == STATE_GAME or game_state == STATE_BOSS_ARENA) and key in (b'1', b'2', b'3'):
+        if key == b'1':
+            current_weapon = WEAPON_GUN
+        elif key == b'2':
+            current_weapon = WEAPON_GRENADE
+        elif key == b'3':
+            current_weapon = WEAPON_KNIFE
+        glutPostRedisplay()
+        return
+
+    # Crouch toggle
+    if (game_state == STATE_GAME or game_state == STATE_BOSS_ARENA) and key in (b'c', b'C'):
+        g = globals()
+        g['is_crouching'] = not g.get('is_crouching', False)
+        glutPostRedisplay()
+        return
+
         
     # Test key for boss damage (K)
     if game_state == STATE_GAME and key in (b'k', b'K'):
@@ -748,6 +811,7 @@ def keyboardListener(key, x, y):
         try: glutLeaveMainLoop()
         except Exception: pass
         exit(0)
+    
 
     if game_state == STATE_MENU:
         if key in (b"o", b"O"):
@@ -853,22 +917,20 @@ def get_muzzle_world():
 
 
 def spawn_projectile():
-    """Spawn a bullet or grenade from the gun muzzle."""
+    """Spawn a bullet/grenade OR perform knife swing."""
     g = globals()
-    global num_grenades
+    global num_grenades, boss_current_health, gun_speed_mult, multi_shot
     
     if 'projectiles' not in g: g['projectiles'] = []
     
-    # Common spawn position calculation
-    muzzle_side     = 22.0   # to the right of torso center
-    muzzle_forward  = 100.0   # forward along facing
+    # Common spawn position calculation (muzzle)
+    muzzle_side     = 22.0
+    muzzle_forward  = 100.0
     leg_h, torso_h, arm_h = 50.0, 60.0, 50.0
     z_arm_center = leg_h + torso_h - arm_h * 0.5
     muzzle_height  = z_arm_center - 8.0
 
-    # Camera yaw sets what you see as "forward"
     dirx, diry = math.sin(camera_yaw), math.cos(camera_yaw)
-    # Right vector for lateral/shoulder offset
     rx, ry = diry, -dirx
 
     px, py, pz = player_pos
@@ -876,17 +938,58 @@ def spawn_projectile():
     my = py + diry*muzzle_forward + ry*muzzle_side
     mz = pz + muzzle_height
 
+    if current_weapon == WEAPON_KNIFE:
+        # Melee arc in front of player
+        def in_front(wx, wy):
+            vx, vy = wx - px, wy - py
+            dist = math.hypot(vx, vy)
+            if dist > KNIFE_RANGE: return False
+            if dist <= 1e-5: return False
+            vx /= dist; vy /= dist
+            dot = dirx*vx + diry*vy
+            return dot >= math.cos(math.radians(KNIFE_ARC_DEG * 0.5))
+
+        for bot in bots[:]:
+            bx, by, _ = bot['pos']
+            if in_front(bx, by):
+                bot['hp'] -= KNIFE_DAMAGE_TO_BOT
+                if bot['hp'] <= 0:
+                    drop_random_item_at(bot['pos'])
+                    bots.remove(bot)
+
+        if game_state == STATE_BOSS_ARENA:
+            bx, by, bz = boss_pos
+            if in_front(bx, by) and abs(pz - bz) <= 120.0:
+                boss_current_health = max(
+                    0,
+                    boss_current_health - int(boss_health * (KNIFE_DAMAGE_TO_BOSS_PCT/100.0))
+                )
+                if boss_current_health <= 0:
+                    trigger_level_complete()
+        return
+
     if current_weapon == WEAPON_GUN:
-        # Regular bullet
-        BULLET_SPEED = 900.0
-        g['projectiles'].append({
-            'type': 'bullet',
-            'pos': [mx, my, mz],
-            'vel': [dirx*BULLET_SPEED, diry*BULLET_SPEED, 0.0],
-            'ttl': 2.0
-        })
+        BULLET_SPEED = 900.0 * gun_speed_mult
+
+        def emit_bullet(dx, dy):
+            g['projectiles'].append({
+                'type': 'bullet',
+                'pos': [mx, my, mz],
+                'vel': [dx*BULLET_SPEED, dy*BULLET_SPEED, 0.0],
+                'ttl': 2.0
+            })
+
+        if multi_shot:
+            for deg in (-8, 0, 8):
+                a = math.radians(deg)
+                c, s = math.cos(a), math.sin(a)
+                dx = dirx*c - diry*s
+                dy = dirx*s + diry*c
+                emit_bullet(dx, dy)
+        else:
+            emit_bullet(dirx, diry)
+
     elif current_weapon == WEAPON_GRENADE and num_grenades > 0:
-        # Grenade with arc and bounce
         GRENADE_SPEED = 400.0
         GRENADE_VERTICAL_SPEED = 200.0
         g['projectiles'].append({
@@ -899,7 +1002,7 @@ def spawn_projectile():
             'damage_radius': 150.0,
             'damage': 50
         })
-        num_grenades -= 1  # Use up one grenade
+        num_grenades -= 1
 
 
 def mouseListener(button, state, x, y):
@@ -942,7 +1045,9 @@ def setupCamera():
 
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    gluPerspective(fovy, 1.25, 0.1, 1500)
+    # Calculate aspect ratio based on actual screen dimensions
+    aspect_ratio = WIDTH / HEIGHT
+    gluPerspective(fovy, aspect_ratio, 0.1, 1500)
 
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
@@ -995,7 +1100,7 @@ def idle():
     MOVE_SPEED  = 220.0
     ROT_SPEED   = 2.6
     ALIGN_SPEED = 8.0
-    R           = 18.0
+    R = (PLAYER_RADIUS * 0.5) if is_crouching else PLAYER_RADIUS
 
     # --- camera rotation from LEFT/RIGHT arrows ---
     if game_state == STATE_GAME or game_state == STATE_BOSS_ARENA:
@@ -1069,6 +1174,19 @@ def idle():
     
     # Check for boss trigger
     check_boss_trigger()
+    # ----- spawn bots periodically -----
+    global _last_bot_spawn
+    if game_state in (STATE_GAME, STATE_BOSS_ARENA):
+        if len(bots) < BOT_MAX and (now - _last_bot_spawn) >= BOT_SPAWN_COOLDOWN:
+            spawn_pos = random_empty_world_pos(min_dist_from_player=350.0)
+            bots.append({'pos': spawn_pos[:], 'hp': BOT_HP, 'speed': BOT_SPEED, 'last_attack': 0.0})
+            _last_bot_spawn = now
+
+    # ----- move bots toward player + touch damage -----
+    update_bots(dt)
+
+    # ----- pickups -----
+    handle_pickups()
     
     # Boss attack logic when in arena
     if game_state == STATE_BOSS_ARENA:
@@ -1205,6 +1323,15 @@ def idle():
                     boss_current_health = max(0, boss_current_health - boss_health * (GRENADE_DAMAGE_TO_BOSS/100.0))
                     if boss_current_health <= 0:
                         trigger_level_complete()
+            
+            # Damage nearby bots
+            for bot in bots[:]:
+                bx, by, _bz = bot['pos']
+                if (px - bx)**2 + (py - by)**2 <= p['damage_radius']**2:
+                    bot['hp'] -= p.get('damage', 50)
+                    if bot['hp'] <= 0:
+                        drop_random_item_at(bot['pos'])
+                        bots.remove(bot)
             continue
 
         # Update position
@@ -1247,6 +1374,21 @@ def idle():
                 # Destroy projectile
                 continue
         
+
+        # Hit bots (bullet direct hit)
+        if p['type'] == 'bullet':
+            removed = False
+            for bot in bots[:]:
+                bx, by, bz = bot['pos']
+                if (nx - bx)**2 + (ny - by)**2 < 20.0**2:
+                    bot['hp'] -= 40
+                    if bot['hp'] <= 0:
+                        drop_random_item_at(bot['pos'])
+                        bots.remove(bot)
+                    removed = True
+                    break
+            if removed:
+                continue
         # Handle wall collisions
         wall_hit = is_wall_at(nx, ny)
         if wall_hit:
@@ -1315,6 +1457,33 @@ def _cell_world_bounds(cx, cy):
     world_x1 = world_x0 + CELL_SIZE
     world_y1 = world_y0 + CELL_SIZE
     return world_x0, world_y0, world_x1, world_y1
+
+
+# --- Global helpers for bots/items ---
+def world_to_cell_global(wx, wy):
+    cx = int(math.floor(wx / CELL_SIZE + COLS / 2.0))
+    cy = int(math.floor((ROWS / 2.0) - (wy / CELL_SIZE) - 1.0))
+    return cx, cy
+
+def is_wall_at_world(wx, wy):
+    cx, cy = world_to_cell_global(wx, wy)
+    if cx < 0 or cx >= COLS or cy < 0 or cy >= ROWS:
+        return True
+    return (cx, cy) in WORLD_MAP
+
+def random_empty_world_pos(min_dist_from_player=300.0, max_tries=200):
+    for _ in range(max_tries):
+        cx = random.randint(0, COLS - 1)
+        cy = random.randint(0, ROWS - 1)
+        if MINI_MAP[cy][cx] == 0:
+            x0, y0, x1, y1 = _cell_world_bounds(cx, cy)
+            wx = 0.5 * (x0 + x1)
+            wy = 0.5 * (y0 + y1)
+            dx = wx - player_pos[0]
+            dy = wy - player_pos[1]
+            if dx*dx + dy*dy >= (min_dist_from_player * min_dist_from_player):
+                return [wx, wy, 0.0]
+    return [0.0, -((ROWS/2.0) - 2) * CELL_SIZE, 0.0]
 
 def draw_floor_only():
     for cy in range(ROWS):
@@ -1396,6 +1565,97 @@ def draw_minimap_overlay():
     glMatrixMode(GL_MODELVIEW)
 
 # ---------- Frame ----------
+
+# --- Bot & Item Systems ---
+def update_bots(dt):
+    global player_current_health
+    if not bots:
+        return
+    px, py, pz = player_pos
+    now = time.time()
+    for bot in bots[:]:
+        bx, by, bz = bot['pos']
+        dx = px - bx
+        dy = py - by
+        dist = math.hypot(dx, dy)
+        ux, uy = (dx/(dist+1e-6), dy/(dist+1e-6))
+        step = bot['speed'] * dt
+        nx = bx + ux * step
+        ny = by + uy * step
+        if is_wall_at_world(nx, by): nx = bx
+        if is_wall_at_world(nx, ny): ny = by
+        bot['pos'][0] = nx
+        bot['pos'][1] = ny
+        # touch damage
+        if dist <= BOT_TOUCH_RANGE and (now - bot['last_attack']) >= BOT_ATTACK_COOLDOWN:
+            player_current_health = max(0, player_current_health - BOT_TOUCH_DAMAGE)
+            bot['last_attack'] = now
+            if player_current_health <= 0:
+                # death reset
+                g = globals()
+                g['game_state'] = STATE_MENU
+                g['current_level'] = 0
+                apply_map(0)
+                reset_player()
+
+def drop_random_item_at(pos3):
+    kind = random.choice(['health', 'upgrade'])
+    if kind == 'health':
+        items.append({'type':'health', 'pos': pos3[:], 'value': 25})
+    else:
+        which = random.choice(['speed', 'multi'])
+        items.append({'type':'upgrade', 'pos': pos3[:], 'upgrade': which})
+
+def handle_pickups():
+    global player_current_health, gun_speed_mult, multi_shot
+    if not items:
+        return
+    px, py, pz = player_pos
+    taken = []
+    for it in items:
+        ix, iy, iz = it['pos']
+        if (px - ix)**2 + (py - iy)**2 <= PICKUP_RANGE**2:
+            if it['type'] == 'health':
+                player_current_health = min(PLAYER_MAX_HEALTH, player_current_health + it.get('value', 25))
+            else:
+                up = it.get('upgrade', 'speed')
+                if up == 'speed':
+                    gun_speed_mult = min(2.0, gun_speed_mult + 0.25)
+                else:
+                    multi_shot = True
+            taken.append(it)
+    for it in taken:
+        items.remove(it)
+
+def draw_bots():
+    if not bots: return
+    glPushMatrix()
+    for bot in bots:
+        bx, by, bz = bot['pos']
+        glPushMatrix()
+        glTranslatef(bx, by, bz + 20.0)
+        glColor3f(0.85, 0.25, 0.9)
+        glScalef(30.0, 30.0, 40.0)
+        glutSolidCube(1.0)
+        glPopMatrix()
+    glPopMatrix()
+
+def draw_items():
+    if not items: return
+    for it in items:
+        ix, iy, iz = it['pos']
+        glPushMatrix()
+        glTranslatef(ix, iy, iz + 10.0)
+        if it['type'] == 'health':
+            glColor3f(0.2, 1.0, 0.2)
+            glutSolidCube(12.0)
+        else:
+            if it.get('upgrade') == 'speed':
+                glColor3f(1.0, 0.9, 0.2)
+            else:
+                glColor3f(0.2, 0.8, 1.0)
+            glutSolidCube(12.0)
+        glPopMatrix()
 def showscreen():
     if game_state == STATE_MENU:
         draw_menu()
@@ -1431,34 +1691,48 @@ def showscreen():
     glEnd()
 
     # Draw level progress HUD
+    hud_y_start = HEIGHT - 30
+    hud_spacing = 30
+    
     if game_state == STATE_BOSS_ARENA:
-        draw_text(10, 770, f"Level {current_level + 1}: BOSS ARENA", color=(1, 0.5, 0))
+        draw_text(10, hud_y_start, f"Level {current_level + 1}: BOSS ARENA", color=(1, 0.5, 0))
     else:
         level_name = MAPS[current_level]["name"]
-        draw_text(10, 770, f"Level {current_level + 1}: {level_name}", color=(1, 1, 0))
+        draw_text(10, hud_y_start, f"Level {current_level + 1}: {level_name}", color=(1, 1, 0))
     
     # Draw Boss Health
     if game_state == STATE_BOSS_ARENA:
-        draw_text(10, 740, f"BOSS HEALTH (Level {current_level + 1}):", color=(1, 0.5, 0.5))
+        draw_text(10, hud_y_start - hud_spacing, f"BOSS HEALTH (Level {current_level + 1}):", color=(1, 0.5, 0.5))
         boss_progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
-        draw_progress_bar(120, 735, 200, 20, boss_progress, color=(1, 0.2, 0.2))
-        draw_text(330, 740, f"{boss_current_health}/{boss_health}", color=(1, 1, 1))
+        draw_progress_bar(120, hud_y_start - hud_spacing - 5, 200, 20, boss_progress, color=(1, 0.2, 0.2))
+        draw_text(330, hud_y_start - hud_spacing, f"{boss_current_health}/{boss_health}", color=(1, 1, 1))
     else:
-        draw_text(10, 740, "Boss Damage:", color=(1, 0.5, 0.5))
+        draw_text(10, hud_y_start - hud_spacing, "Boss Damage:", color=(1, 0.5, 0.5))
         boss_progress = 1 - (boss_current_health / boss_health)  # Inverse of boss health
-        draw_progress_bar(120, 735, 200, 20, boss_progress, color=(1, 0.2, 0.2))
+        draw_progress_bar(120, hud_y_start - hud_spacing - 5, 200, 20, boss_progress, color=(1, 0.2, 0.2))
     
     # Draw Player Health
-    draw_text(10, 710, "Player Health:", color=(0.5, 1, 0.5))
+    draw_text(10, hud_y_start - 2*hud_spacing, "Player Health:", color=(0.5, 1, 0.5))
     player_progress = max(0, player_current_health / PLAYER_MAX_HEALTH)  # Ensure progress doesn't go negative
-    draw_progress_bar(120, 705, 200, 20, player_progress, color=(0.2, 1, 0.2))
-    draw_text(330, 710, f"{max(0, player_current_health)}/{PLAYER_MAX_HEALTH}", color=(1, 1, 1))
+    draw_progress_bar(120, hud_y_start - 2*hud_spacing - 5, 200, 20, player_progress, color=(0.2, 1, 0.2))
+    draw_text(330, hud_y_start - 2*hud_spacing, f"{max(0, player_current_health)}/{PLAYER_MAX_HEALTH}", color=(1, 1, 1))
     
     # Draw Weapon Info
-    weapon_text = "GRENADE ({})" if current_weapon == WEAPON_GRENADE else "GUN"
-    weapon_text = weapon_text.format(num_grenades) if current_weapon == WEAPON_GRENADE else weapon_text
-    draw_text(10, 680, f"Weapon: {weapon_text}", color=(1, 1, 1))
-    draw_text(10, 660, "Press G to switch weapon", color=(0.8, 0.8, 0.8))
+    if current_weapon == WEAPON_GRENADE:
+        weapon_text = f"GRENADE ({num_grenades})"
+    elif current_weapon == WEAPON_KNIFE:
+        weapon_text = "KNIFE"
+    else:
+        weapon_text = "GUN"
+    draw_text(10, hud_y_start - 3*hud_spacing, f"Weapon: {weapon_text}", color=(1, 1, 1))
+    draw_text(10, hud_y_start - 4*hud_spacing, "1=Gun  2=Grenade  3=Knife  |  G=Toggle Gun⇄Grenade  |  C=Crouch", color=(0.8, 0.8, 0.8))
+
+    # Upgrades + crouch state
+    upg_bits = []
+    if multi_shot: upg_bits.append("Multi-shot")
+    if gun_speed_mult > 1.0: upg_bits.append(f"Bullet x{gun_speed_mult:.2f}")
+    crouch_text = "ON" if is_crouching else "OFF"
+    draw_text(10, hud_y_start - 5*hud_spacing, f"Upgrades: {', '.join(upg_bits) if upg_bits else 'None'}   |   Crouch: {crouch_text}", color=(0.8, 0.95, 1.0))
 
     # Draw "Fight Boss" text when near the trigger area
     if game_state == STATE_GAME:
@@ -1480,6 +1754,11 @@ def showscreen():
     # player (rotates on spot)
     draw_shapes()
 
+    # bots & items
+    draw_bots()
+    draw_items()
+
+
     # minimap
     draw_minimap_overlay()
 
@@ -1487,11 +1766,24 @@ def showscreen():
 
 # ---------- Main ----------
 def main():
+    global WIDTH, HEIGHT
+    
     glutInit()
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH) 
     glutInitWindowSize(WIDTH, HEIGHT)
     glutInitWindowPosition(0,0)
     glutCreateWindow(b"Final Lab Project 3D")
+    
+    # Enable fullscreen mode
+    glutFullScreen()
+    
+    # Get the actual screen dimensions after fullscreen
+    screen_width = glutGet(GLUT_SCREEN_WIDTH)
+    screen_height = glutGet(GLUT_SCREEN_HEIGHT)
+    
+    # Update global dimensions to match screen
+    WIDTH = screen_width
+    HEIGHT = screen_height
 
     # start on the first map
     apply_map(0)
